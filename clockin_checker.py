@@ -12,8 +12,8 @@ st.title("BT Session Start Checker")
 
 st.markdown("""
 Upload the two files below.  
-**File 1 (HiRasmus)** must include: `Start Time`, `Appointment ID`, `Status`  
-**File 2 (Aloha Sessions)** must include: `Staff Name`, `Client Name`, `Appointment ID`, `Appt. Start Time`, `Service Name`  
+**File 1 (HiRasmus)** must include: `Start time`, `Aloha Appointment ID`, `Status`  
+**File 2 (Aloha Sessions)** must include: `Staff Name`, `Client Name`, `Appointment ID`, `Appt. Start Time`, `Service Name`, `Client City`  
 """)
 
 with st.sidebar:
@@ -83,13 +83,10 @@ if f_hirasmus is not None and f_aloha is not None:
         df_hi = normalize_cols(df_hi)
         df_al = normalize_cols(df_al)
 
-        # Fix Appointment ID types (remove .0 from floats)
-        df_hi["Appointment ID"] = df_hi["Appointment ID"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        df_al["Appointment ID"] = df_al["Appointment ID"].astype(str).str.strip()
-
         # Validate required columns
-        req_hi = {"Start Time", "Appointment ID", "Status"}
-        req_al = {"Staff Name", "Client Name", "Appointment ID", "Appt. Start Time", "Service Name"}
+        req_hi = {"Start time", "Aloha Appointment ID", "Status"}
+        req_al = {"Staff Name", "Client Name", "Appointment ID", "Appt. Start Time", "Service Name", "Client City"}
+
         missing_hi = req_hi - set(df_hi.columns)
         missing_al = req_al - set(df_al.columns)
         if missing_hi:
@@ -98,6 +95,12 @@ if f_hirasmus is not None and f_aloha is not None:
         if missing_al:
             st.error(f"Aloha Sessions is missing: {sorted(missing_al)}")
             st.stop()
+
+        # Fix ID types (remove .0 from floats / Excel)
+        df_hi["Aloha Appointment ID"] = (
+            df_hi["Aloha Appointment ID"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        )
+        df_al["Appointment ID"] = df_al["Appointment ID"].astype(str).str.strip()
 
         # Filter Aloha to "Direct Service BT"
         df_al = df_al[df_al["Service Name"] == "Direct Service BT"].copy()
@@ -135,7 +138,7 @@ if f_hirasmus is not None and f_aloha is not None:
         df_al["_scheduled_dt"] = pd.Series([round_to_minute(dt) for dt in scheduled_list], index=df_al.index)
 
         # Localize Start Time - strip microseconds first
-        df_hi["Start Time Clean"] = df_hi["Start Time"].astype(str).str.replace(r"\.[\d]+$", "", regex=True)
+        df_hi["Start Time Clean"] = df_hi["Start time"].astype(str).str.replace(r"\.[\d]+$", "", regex=True)
         start_times = pd.to_datetime(df_hi["Start Time Clean"], errors="coerce")
         processed_times = []
         for dt in start_times:
@@ -143,7 +146,7 @@ if f_hirasmus is not None and f_aloha is not None:
                 processed_times.append(pd.NaT)
             else:
                 # Convert timestamp to datetime
-                dt_obj = dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt
+                dt_obj = dt.to_pydatetime() if hasattr(dt, "to_pydatetime") else dt
                 # Handle timezone
                 if dt_obj.tzinfo is not None:
                     dt_obj = dt_obj.astimezone(TZ)
@@ -153,15 +156,17 @@ if f_hirasmus is not None and f_aloha is not None:
                 processed_times.append(round_to_minute(dt_obj))
         df_hi["_actual_start_dt"] = pd.Series(processed_times, index=df_hi.index)
 
-        # Keep earliest per Appointment ID
-        df_hi_sorted = df_hi.sort_values(by=["Appointment ID", "_actual_start_dt"])
-        df_hi_min = df_hi_sorted.groupby("Appointment ID", as_index=False).first()
+        # Keep earliest per Aloha Appointment ID
+        df_hi_sorted = df_hi.sort_values(by=["Aloha Appointment ID", "_actual_start_dt"])
+        df_hi_min = df_hi_sorted.groupby("Aloha Appointment ID", as_index=False).first()
 
+        # Merge on Appointment ID (Aloha) vs Aloha Appointment ID (HiRasmus)
         merged = pd.merge(
             df_al,
-            df_hi_min[["Appointment ID", "_actual_start_dt", "Start Time", "Status"]],
-            on="Appointment ID",
-            how="left"
+            df_hi_min[["Aloha Appointment ID", "_actual_start_dt", "Start time", "Status"]],
+            left_on="Appointment ID",
+            right_on="Aloha Appointment ID",
+            how="left",
         )
 
         # Normalize timezones again
@@ -170,11 +175,14 @@ if f_hirasmus is not None and f_aloha is not None:
         )
 
         merged["_actual_start_dt"] = pd.to_datetime(merged["_actual_start_dt"], errors="coerce").apply(
-            lambda x: x.astimezone(TZ) if pd.notna(x) and x.tzinfo is not None else
-                      (x.replace(tzinfo=TZ) if pd.notna(x) else x)
+            lambda x: x.astimezone(TZ)
+            if pd.notna(x) and x.tzinfo is not None
+            else (x.replace(tzinfo=TZ) if pd.notna(x) else x)
         )
 
-        merged["minutes_diff"] = (merged["_actual_start_dt"] - merged["_scheduled_dt"]).dt.total_seconds() / 60.0
+        merged["minutes_diff"] = (
+            merged["_actual_start_dt"] - merged["_scheduled_dt"]
+        ).dt.total_seconds() / 60.0
 
         now_local = local_now()
 
@@ -205,11 +213,24 @@ if f_hirasmus is not None and f_aloha is not None:
         df_flagged = df_past_now[df_past_now["Reason"] != "Within tolerance"].copy()
 
         cols = [
-            "Staff Name", "Client Name", "Appointment ID",
-            "Service Name", "Appt. Start Time", "Start Time", "Status",
-            "_scheduled_dt", "_actual_start_dt", "minutes_diff", "Reason"
+            "Staff Name",
+            "Client Name",
+            "Appointment ID",
+            "Aloha Appointment ID",
+            "Client City",
+            "Service Name",
+            "Appt. Start Time",
+            "Start time",
+            "Status",
+            "_scheduled_dt",
+            "_actual_start_dt",
+            "minutes_diff",
+            "Reason",
         ]
-        def safe_cols(df): return [c for c in cols if c in df.columns]
+
+        def safe_cols(df_):
+            return [c for c in cols if c in df_.columns]
+
         out_valid = df_valid[safe_cols(df_valid)]
         out_flagged = df_flagged[safe_cols(df_flagged)]
         out_future = df_future[safe_cols(df_future)]
@@ -227,7 +248,7 @@ if f_hirasmus is not None and f_aloha is not None:
             for name, df_export in {
                 "Valid": out_valid,
                 "Flagged": out_flagged,
-                "Future": out_future
+                "Future": out_future,
             }.items():
                 df_exp = df_export.copy()
                 for col in ["_scheduled_dt", "_actual_start_dt"]:
@@ -243,7 +264,7 @@ if f_hirasmus is not None and f_aloha is not None:
             "📥 Download Excel (Valid / Flagged / Future)",
             data=buffer.getvalue(),
             file_name=f"bt_session_check_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
         st.caption(
