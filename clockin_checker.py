@@ -2,6 +2,7 @@ import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from openpyxl.utils import get_column_letter
+from difflib import SequenceMatcher
 import pandas as pd
 import streamlit as st
 
@@ -22,6 +23,14 @@ with st.sidebar:
     only_check_current_minute = st.checkbox("Only check the current minute", value=False)
     assume_today_if_no_date = st.checkbox("If no Appt. Date, assume today", value=True)
     show_tables = st.checkbox("Preview results in app", value=True)
+
+    st.markdown("---")
+    st.header("BT Contacts (optional)")
+    bt_contacts_file = st.file_uploader(
+        "Upload BT Contacts (BT Name, Phone, Email)",
+        type=["csv", "xlsx"],
+        key="bt_contacts"
+    )
 
 col1, col2 = st.columns(2)
 with col1:
@@ -75,6 +84,7 @@ def local_now():
     return datetime.now(TZ).replace(second=0, microsecond=0)
 
 
+# ---------- MAIN LOGIC ----------
 if f_hirasmus is not None and f_aloha is not None:
     try:
         df_hi = read_any(f_hirasmus)
@@ -105,6 +115,67 @@ if f_hirasmus is not None and f_aloha is not None:
         # Filter Aloha to "Direct Service BT"
         df_al = df_al[df_al["Service Name"] == "Direct Service BT"].copy()
         df_al.reset_index(drop=True, inplace=True)
+
+        # -----------------------------
+        # OPTIONAL: Fuzzy match BT contacts -> Staff Name
+        # -----------------------------
+        df_al["Phone"] = ""
+        df_al["Email"] = ""
+
+        if bt_contacts_file is not None:
+            bt_df = read_any(bt_contacts_file)
+            bt_df = normalize_cols(bt_df)
+
+            bt_required = {"BT Name", "Phone", "Email"}
+            bt_missing = bt_required - set(bt_df.columns)
+            if bt_missing:
+                st.error(f"BT Contacts file is missing: {sorted(bt_missing)}")
+            else:
+                # Convert "First Last" -> "Last, First"
+                def to_last_first(name: str) -> str:
+                    parts = str(name).strip().split()
+                    if len(parts) >= 2:
+                        first = " ".join(parts[:-1])
+                        last = parts[-1]
+                        return f"{last}, {first}"
+                    return str(name).strip()
+
+                bt_df["BT_formatted"] = bt_df["BT Name"].apply(to_last_first)
+
+                # Normalize strings for fuzzy comparison
+                def norm_name(s: str) -> str:
+                    s = str(s).strip().lower()
+                    s = s.replace(",", " ")
+                    s = " ".join(s.split())  # collapse multiple spaces
+                    return s
+
+                bt_df["bt_norm"] = bt_df["BT_formatted"].apply(norm_name)
+
+                staff_to_phone = {}
+                staff_to_email = {}
+
+                staff_unique = df_al["Staff Name"].dropna().unique()
+
+                for staff in staff_unique:
+                    staff_norm = norm_name(staff)  # DO NOT reorder Staff Name, just normalize
+                    best_score = 0.0
+                    best_row = None
+
+                    for _, bt_row in bt_df.iterrows():
+                        bt_name_norm = bt_row["bt_norm"]
+                        score = SequenceMatcher(None, staff_norm, bt_name_norm).ratio()
+                        if score > best_score:
+                            best_score = score
+                            best_row = bt_row
+
+                    # Threshold for "good enough"
+                    if best_row is not None and best_score >= 0.8:
+                        staff_to_phone[staff] = best_row["Phone"]
+                        staff_to_email[staff] = best_row["Email"]
+
+                # Attach to df_al
+                df_al["Phone"] = df_al["Staff Name"].map(staff_to_phone)
+                df_al["Email"] = df_al["Staff Name"].map(staff_to_email)
 
         # Try to get Appt. Date
         date_cols = [c for c in df_al.columns if c.strip().lower() in {"appt. date", "appointment date", "date"}]
@@ -145,14 +216,11 @@ if f_hirasmus is not None and f_aloha is not None:
             if pd.isna(dt):
                 processed_times.append(pd.NaT)
             else:
-                # Convert timestamp to datetime
                 dt_obj = dt.to_pydatetime() if hasattr(dt, "to_pydatetime") else dt
-                # Handle timezone
                 if dt_obj.tzinfo is not None:
                     dt_obj = dt_obj.astimezone(TZ)
                 else:
                     dt_obj = dt_obj.replace(tzinfo=TZ)
-                # Round to minute
                 processed_times.append(round_to_minute(dt_obj))
         df_hi["_actual_start_dt"] = pd.Series(processed_times, index=df_hi.index)
 
@@ -214,6 +282,8 @@ if f_hirasmus is not None and f_aloha is not None:
 
         cols = [
             "Staff Name",
+            "Phone",
+            "Email",
             "Client Name",
             "Appointment ID",
             "Aloha Appointment ID",
