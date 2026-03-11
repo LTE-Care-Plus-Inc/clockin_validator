@@ -158,7 +158,7 @@ if f_hirasmus is not None and f_aloha is not None:
 
         # Fix ID types (remove .0 from floats / Excel)
         df_hi["Aloha Appointment ID"] = (
-            df_hi["Aloha Appointment ID"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+            df_hi["AlohaABA Appointment ID"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
         )
         df_al["Appointment ID"] = df_al["Appointment ID"].astype(str).str.strip()
 
