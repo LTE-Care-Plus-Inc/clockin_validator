@@ -11,60 +11,61 @@ TZ = ZoneInfo("America/New_York")
 st.set_page_config(page_title="BT Session Start Checker", layout="wide")
 st.title("BT Session Start Checker")
 
-st.markdown("""
-This tool checks whether **BT session start times in HiRasmus** match the **scheduled start times in Aloha** within a chosen tolerance window.
+with st.expander("Instructions"):
+    st.markdown("""
+    This tool checks whether **BT session start times in HiRasmus** match the **scheduled start times in Aloha** within a chosen tolerance window.
 
----
+    ---
 
-### 🔹 Files to Upload
+    ### 🔹 Files to Upload
 
-1. **File 1 – HiRasmus export**  
-   A CSV or Excel file that contains one row per session attempt. It **must include** at least these columns (case-sensitive):
+    1. **File 1 – HiRasmus export**  
+    A CSV or Excel file that contains one row per session attempt. It **must include** at least these columns (case-sensitive):
 
-   - `Start time` – the actual time the BT clicked "Start" in HiRasmus  
-   - `Aloha Appointment ID` – the appointment ID that links to Aloha  
-   - `Status` – current session status (e.g., Completed, In progress, etc.)
+    - `Start time` – the actual time the BT clicked "Start" in HiRasmus  
+    - `Aloha Appointment ID` – the appointment ID that links to Aloha  
+    - `Status` – current session status (e.g., Completed, In progress, etc.)
 
-2. **File 2 – Aloha Sessions export**  
-   A CSV or Excel file with the scheduled sessions from Aloha. It **must include** at least:
+    2. **File 2 – Aloha Sessions export**  
+    A CSV or Excel file with the scheduled sessions from Aloha. It **must include** at least:
 
-   - `Staff Name` – BT’s name as it appears in Aloha  
-   - `Client Name` – client’s name  
-   - `Appointment ID` – appointment ID (will be matched to `Aloha Appointment ID`)  
-   - `Appt. Start Time` – scheduled start time (e.g., 3:00 PM)  
-   - `Service Name` – service type (the tool only checks rows where this is `Direct Service BT`)  
-   - `Client City` – used for filtering or reporting
+    - `Staff Name` – BT’s name as it appears in Aloha  
+    - `Client Name` – client’s name  
+    - `Appointment ID` – appointment ID (will be matched to `Aloha Appointment ID`)  
+    - `Appt. Start Time` – scheduled start time (e.g., 3:00 PM)  
+    - `Service Name` – service type (the tool only checks rows where this is `Direct Service BT`)  
+    - `Client City` – used for filtering or reporting
 
-3. **(Optional) BT Contacts file**  
-   You may also upload a separate **BT contact list** in CSV/Excel format with columns:
+    3. **(Optional) BT Contacts file**  
+    You may also upload a separate **BT contact list** in CSV/Excel format with columns:
 
-   - `BT Name` – BT’s name (e.g., "Jane Doe")  
-   - `Phone` – BT’s phone number  
-   - `Email` – BT’s email  
+    - `BT Name` – BT’s name (e.g., "Jane Doe")  
+    - `Phone` – BT’s phone number  
+    - `Email` – BT’s email  
 
-   The app will try to **fuzzy-match** `BT Name` to the Aloha `Staff Name` and attach Phone/Email to each row, so you can easily follow up with BTs on flagged sessions.
+    The app will try to **fuzzy-match** `BT Name` to the Aloha `Staff Name` and attach Phone/Email to each row, so you can easily follow up with BTs on flagged sessions.
 
----
+    ---
 
-### 🔍 What this checker does
+    ### 🔍 What this checker does
 
-- Converts and aligns **scheduled start time** from Aloha and **actual start time** from HiRasmus to the same timezone (America/New_York).
-- For each `Aloha Appointment ID`, it keeps the **earliest start** recorded in HiRasmus.
-- Calculates the time difference (in minutes) between **scheduled** and **actual** start times.
-- Classifies each session as:
-  - **Within tolerance** – actual start is inside your ± *Tolerance (minutes)* setting.
-  - **Outside tolerance** – actual start is more than that tolerance early/late.
-  - **No start recorded** – no HiRasmus start time found.
-  - **Future session** – scheduled start time is in the future.
-  - **Missing/invalid time** – Appt. Start Time is missing or in an unrecognized format.
+    - Converts and aligns **scheduled start time** from Aloha and **actual start time** from HiRasmus to the same timezone (America/New_York).
+    - For each `Aloha Appointment ID`, it keeps the **earliest start** recorded in HiRasmus.
+    - Calculates the time difference (in minutes) between **scheduled** and **actual** start times.
+    - Classifies each session as:
+      - **Within tolerance** – actual start is inside your ± *Tolerance (minutes)* setting.
+      - **Outside tolerance** – actual start is more than that tolerance early/late.
+      - **No start recorded** – no HiRasmus start time found.
+      - **Future session** – scheduled start time is in the future.
+      - **Missing/invalid time** – Appt. Start Time is missing or in an unrecognized format.
 
-The results are split into three tables and Excel sheets:
-- **Valid** – within tolerance  
-- **Flagged** – need review (late/early/missing starts, etc.)  
-- **Future** – sessions that haven’t started yet
+    The results are split into three tables and Excel sheets:
+    - **Valid** – within tolerance  
+    - **Flagged** – need review (late/early/missing starts, etc.)  
+    - **Future** – sessions that haven’t started yet
 
-Use the options in the left sidebar to adjust the tolerance window, restrict to the **current minute only**, and choose whether to **assume today’s date** when the Aloha file has no appointment date.
-""")
+    Use the options in the left sidebar to adjust the tolerance window, restrict to the **current minute only**, and choose whether to **assume today’s date** when the Aloha file has no appointment date.
+    """)
 
 
 with st.sidebar:
