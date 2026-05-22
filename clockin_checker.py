@@ -2,11 +2,13 @@ import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 from difflib import SequenceMatcher
 import pandas as pd
 import streamlit as st
 
 TZ = ZoneInfo("America/New_York")
+CACHE_TTL_SECONDS = 2 * 60 * 60
 
 st.set_page_config(page_title="BT Session Start Checker", layout="wide")
 st.title("BT Session Start Checker")
@@ -36,14 +38,23 @@ with st.expander("Instructions"):
     - `Service Name` – service type (the tool only checks rows where this is `Direct Service BT`)  
     - `Client City` – used for filtering or reporting
 
-    3. **(Optional) BT Contacts file**  
+    3. **(Optional) BT Contacts file**
     You may also upload a separate **BT contact list** in CSV/Excel format with columns:
 
-    - `BT Name` – BT’s name (e.g., "Jane Doe")  
-    - `Phone` – BT’s phone number  
-    - `Email` – BT’s email  
+    - `BT Name` – BT’s name (e.g., "Jane Doe")
+    - `Phone` – BT’s phone number
+    - `Email` – BT’s email
 
     The app will try to **fuzzy-match** `BT Name` to the Aloha `Staff Name` and attach Phone/Email to each row, so you can easily follow up with BTs on flagged sessions.
+
+    4. **(Optional) Case Coordinator file**
+    You may also upload a separate **Case Coordinator list** in CSV/Excel format with columns:
+
+    - `Child's Full Name` – child's name in "First Last" format (e.g., "Jane Doe")
+    - `Case Coordinator Name` – coordinator assigned to the child
+    - `Guardian 1 Phone` – guardian's phone number (optional)
+
+    The app will try to **fuzzy-match** `Child's Full Name` to the Aloha `Client Name` and attach the `Case Coordinator Name` and `Guardian 1 Phone` (labelled `Guardian Number` in the output) to each row.
 
     ---
 
@@ -83,6 +94,14 @@ with st.sidebar:
         key="bt_contacts"
     )
 
+    st.markdown("---")
+    st.header("Case Coordinators (optional)")
+    coordinators_file = st.file_uploader(
+        "Upload Case Coordinators (Child's Full Name, Case Coordinator Name)",
+        type=["csv", "xlsx"],
+        key="coordinators"
+    )
+
 col1, col2 = st.columns(2)
 with col1:
     f_hirasmus = st.file_uploader("Upload File 1: HiRasmus", type=["csv", "xlsx"])
@@ -105,6 +124,58 @@ def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
         if df[c].dtype == object:
             df[c] = df[c].astype(str).str.strip()
     return df
+
+
+def to_last_first(name: str) -> str:
+    # Convert "First Last" -> "Last, First"
+    parts = str(name).strip().split()
+    if len(parts) >= 2:
+        first = " ".join(parts[:-1])
+        last = parts[-1]
+        return f"{last}, {first}"
+    return str(name).strip()
+
+
+def norm_name(s: str) -> str:
+    # Normalize strings for fuzzy comparison
+    s = str(s).strip().lower()
+    s = s.replace(",", " ")
+    s = " ".join(s.split())  # collapse multiple spaces
+    return s
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def match_bt_contacts(staff_names, bt_candidates, threshold=0.8):
+    matches = {}
+    for staff in staff_names:
+        staff_norm = norm_name(staff)
+        best_score = 0.0
+        best_contact = None
+        for bt_name_norm, phone, email in bt_candidates:
+            score = SequenceMatcher(None, staff_norm, bt_name_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_contact = (phone, email)
+        if best_contact is not None and best_score >= threshold:
+            matches[staff] = best_contact
+    return matches
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def match_case_coordinators(client_names, coord_candidates, threshold=0.8):
+    matches = {}
+    for client in client_names:
+        client_norm = norm_name(client)
+        best_score = 0.0
+        best_coord = None
+        for child_name_norm, coordinator, guardian in coord_candidates:
+            score = SequenceMatcher(None, client_norm, child_name_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_coord = (coordinator, guardian)
+        if best_coord is not None and best_score >= threshold:
+            matches[client] = best_coord
+    return matches
 
 
 def parse_time_cell(val):
@@ -165,12 +236,28 @@ if f_hirasmus is not None and f_aloha is not None:
 
         # Filter Aloha to "Direct Service BT"
         df_al = df_al[df_al["Service Name"] == "Direct Service BT"].copy()
+
+        # Exclude demo/test clients
+        EXCLUDED_CLIENTS = {"Wang Demo, Marry"}
+        df_al = df_al[~df_al["Client Name"].isin(EXCLUDED_CLIENTS)].copy()
+
         df_al.reset_index(drop=True, inplace=True)
+
+        # Discover / normalize the Appt. End Time column (if present)
+        end_time_cols = [
+            c for c in df_al.columns
+            if c.strip().lower() in {"appt. end time", "appointment end time", "end time"}
+        ]
+        if end_time_cols:
+            if end_time_cols[0] != "Appt. End Time":
+                df_al = df_al.rename(columns={end_time_cols[0]: "Appt. End Time"})
+        else:
+            df_al["Appt. End Time"] = ""
 
         # -----------------------------
         # OPTIONAL: Fuzzy match BT contacts -> Staff Name
         # -----------------------------
-        df_al["Phone"] = ""
+        df_al["BT Number"] = ""
         df_al["Email"] = ""
 
         if bt_contacts_file is not None:
@@ -182,51 +269,66 @@ if f_hirasmus is not None and f_aloha is not None:
             if bt_missing:
                 st.error(f"BT Contacts file is missing: {sorted(bt_missing)}")
             else:
-                # Convert "First Last" -> "Last, First"
-                def to_last_first(name: str) -> str:
-                    parts = str(name).strip().split()
-                    if len(parts) >= 2:
-                        first = " ".join(parts[:-1])
-                        last = parts[-1]
-                        return f"{last}, {first}"
-                    return str(name).strip()
-
                 bt_df["BT_formatted"] = bt_df["BT Name"].apply(to_last_first)
-
-                # Normalize strings for fuzzy comparison
-                def norm_name(s: str) -> str:
-                    s = str(s).strip().lower()
-                    s = s.replace(",", " ")
-                    s = " ".join(s.split())  # collapse multiple spaces
-                    return s
-
                 bt_df["bt_norm"] = bt_df["BT_formatted"].apply(norm_name)
 
-                staff_to_phone = {}
-                staff_to_email = {}
+                staff_unique = tuple(df_al["Staff Name"].dropna().unique())
+                bt_candidates = tuple(
+                    bt_df[["bt_norm", "Phone", "Email"]].itertuples(index=False, name=None)
+                )
+                staff_matches = match_bt_contacts(staff_unique, bt_candidates)
+                staff_to_phone = {staff: phone for staff, (phone, _) in staff_matches.items()}
+                staff_to_email = {staff: email for staff, (_, email) in staff_matches.items()}
 
-                staff_unique = df_al["Staff Name"].dropna().unique()
+                # Attach to df_al (Phone -> BT Number)
+                df_al["BT Number"] = df_al["Staff Name"].map(staff_to_phone)
+                df_al["Email"] = df_al["Staff Name"].map(staff_to_email)
 
-                for staff in staff_unique:
-                    staff_norm = norm_name(staff)  # DO NOT reorder Staff Name, just normalize
-                    best_score = 0.0
-                    best_row = None
+        # -----------------------------
+        # OPTIONAL: Fuzzy match Case Coordinators -> Client Name
+        # -----------------------------
+        df_al["Case Coordinator Name"] = ""
+        df_al["Guardian Number"] = ""
 
-                    for _, bt_row in bt_df.iterrows():
-                        bt_name_norm = bt_row["bt_norm"]
-                        score = SequenceMatcher(None, staff_norm, bt_name_norm).ratio()
-                        if score > best_score:
-                            best_score = score
-                            best_row = bt_row
+        if coordinators_file is not None:
+            coord_df = read_any(coordinators_file)
+            coord_df = normalize_cols(coord_df)
 
-                    # Threshold for "good enough"
-                    if best_row is not None and best_score >= 0.8:
-                        staff_to_phone[staff] = best_row["Phone"]
-                        staff_to_email[staff] = best_row["Email"]
+            coord_required = {"Child's Full Name", "Case Coordinator Name"}
+            coord_missing = coord_required - set(coord_df.columns)
+            if coord_missing:
+                st.error(f"Case Coordinator file is missing: {sorted(coord_missing)}")
+            else:
+                has_guardian = "Guardian 1 Phone" in coord_df.columns
+
+                # Child's Full Name is "First Last" -> convert to "Last, First"
+                # to line up with Aloha Client Name formatting
+                coord_df["Child_formatted"] = coord_df["Child's Full Name"].apply(to_last_first)
+                coord_df["child_norm"] = coord_df["Child_formatted"].apply(norm_name)
+
+                if not has_guardian:
+                    coord_df["Guardian 1 Phone"] = ""
+
+                client_unique = tuple(df_al["Client Name"].dropna().unique())
+                coord_candidates = tuple(
+                    coord_df[
+                        ["child_norm", "Case Coordinator Name", "Guardian 1 Phone"]
+                    ].itertuples(index=False, name=None)
+                )
+                client_matches = match_case_coordinators(client_unique, coord_candidates)
+                client_to_coord = {
+                    client: coordinator
+                    for client, (coordinator, _) in client_matches.items()
+                }
+                client_to_guardian = {
+                    client: guardian
+                    for client, (_, guardian) in client_matches.items()
+                }
 
                 # Attach to df_al
-                df_al["Phone"] = df_al["Staff Name"].map(staff_to_phone)
-                df_al["Email"] = df_al["Staff Name"].map(staff_to_email)
+                df_al["Case Coordinator Name"] = df_al["Client Name"].map(client_to_coord)
+                if has_guardian:
+                    df_al["Guardian Number"] = df_al["Client Name"].map(client_to_guardian)
 
         # Try to get Appt. Date
         date_cols = [c for c in df_al.columns if c.strip().lower() in {"appt. date", "appointment date", "date"}]
@@ -288,20 +390,41 @@ if f_hirasmus is not None and f_aloha is not None:
             how="left",
         )
 
-        # Normalize timezones again
-        merged["_scheduled_dt"] = pd.to_datetime(merged["_scheduled_dt"], errors="coerce").apply(
-            lambda x: x.replace(tzinfo=TZ) if pd.notna(x) and x.tzinfo is None else x
-        )
+        # Normalize timezones again — force both columns to be tz-aware in TZ.
+        # This handles the all-NaT case (where pd.to_datetime would otherwise
+        # return naive datetime64 and break tz-aware subtraction).
+        def _force_tz_aware(series, tz):
+            s = pd.to_datetime(series, errors="coerce")
+            # Object dtype (mixed tz-aware Timestamps) — normalize element-wise
+            if s.dtype == object:
+                def fix(x):
+                    if pd.isna(x):
+                        return pd.NaT
+                    if getattr(x, "tzinfo", None) is None:
+                        return x.tz_localize(tz) if hasattr(x, "tz_localize") else x.replace(tzinfo=tz)
+                    return x.tz_convert(tz) if hasattr(x, "tz_convert") else x.astimezone(tz)
+                return s.apply(fix)
+            # datetime64 dtype path
+            try:
+                if s.dt.tz is None:
+                    return s.dt.tz_localize(tz, nonexistent="NaT", ambiguous="NaT")
+                return s.dt.tz_convert(tz)
+            except (AttributeError, TypeError):
+                return s
 
-        merged["_actual_start_dt"] = pd.to_datetime(merged["_actual_start_dt"], errors="coerce").apply(
-            lambda x: x.astimezone(TZ)
-            if pd.notna(x) and x.tzinfo is not None
-            else (x.replace(tzinfo=TZ) if pd.notna(x) else x)
-        )
+        merged["_scheduled_dt"] = _force_tz_aware(merged["_scheduled_dt"], TZ)
+        merged["_actual_start_dt"] = _force_tz_aware(merged["_actual_start_dt"], TZ)
 
-        merged["minutes_diff"] = (
-            merged["_actual_start_dt"] - merged["_scheduled_dt"]
-        ).dt.total_seconds() / 60.0
+        # Compute minutes_diff defensively (works for both datetime64 and object dtype).
+        def _diff_minutes(actual, scheduled):
+            if pd.isna(actual) or pd.isna(scheduled):
+                return float("nan")
+            return (actual - scheduled).total_seconds() / 60.0
+
+        merged["minutes_diff"] = [
+            _diff_minutes(a, s)
+            for a, s in zip(merged["_actual_start_dt"], merged["_scheduled_dt"])
+        ]
 
         now_local = local_now()
 
@@ -333,9 +456,11 @@ if f_hirasmus is not None and f_aloha is not None:
 
         cols = [
             "Staff Name",
-            "Phone",
+            "BT Number",
             "Email",
             "Client Name",
+            "Case Coordinator Name",
+            "Guardian Number",
             "Appointment ID",
             "Aloha Appointment ID",
             "Client City",
@@ -385,6 +510,84 @@ if f_hirasmus is not None and f_aloha is not None:
             "📥 Download Excel (Valid / Flagged / Future)",
             data=buffer.getvalue(),
             file_name=f"bt_session_check_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # -----------------------------
+        # Secondary export: "No matching record" only
+        # (ignores tolerance — just past-due sessions with no HiRasmus start)
+        # -----------------------------
+        no_match_cols = [
+            "Staff Name",
+            "BT Number",
+            "Email",
+            "Client Name",
+            "Case Coordinator Name",
+            "Guardian Number",
+            "Appt. Start Time",
+            "Appt. End Time",
+            "Completed",
+            "Remark",
+        ]
+
+        no_match_df = df_past_now[df_past_now["_actual_start_dt"].isna()].copy()
+
+        # Add fillable columns
+        no_match_df["Completed"] = "No"
+        no_match_df["Remark"] = ""
+
+        # Sort by Case Coordinator Name (blanks last)
+        no_match_df["_coord_sort_key"] = (
+            no_match_df["Case Coordinator Name"].fillna("").astype(str).str.strip()
+        )
+        no_match_df["_coord_blank"] = no_match_df["_coord_sort_key"] == ""
+        no_match_df = no_match_df.sort_values(
+            by=["_coord_blank", "_coord_sort_key", "Client Name"],
+            kind="stable",
+        ).reset_index(drop=True)
+
+        # Insert a blank separator row whenever the coordinator changes
+        rows_out = []
+        prev_coord = None
+        for _, r in no_match_df.iterrows():
+            cur_coord = r["_coord_sort_key"]
+            if prev_coord is not None and cur_coord != prev_coord:
+                rows_out.append({c: "" for c in no_match_cols})  # blank separator row
+            rows_out.append({c: r.get(c, "") for c in no_match_cols})
+            prev_coord = cur_coord
+
+        no_match_out = pd.DataFrame(rows_out, columns=no_match_cols)
+
+        buffer_no_match = io.BytesIO()
+        with pd.ExcelWriter(buffer_no_match, engine="openpyxl") as writer:
+            no_match_out.to_excel(writer, index=False, sheet_name="No Matching Record")
+            ws = writer.sheets["No Matching Record"]
+
+            # Column widths
+            for i, col in enumerate(no_match_out.columns, 1):
+                if len(no_match_out) == 0:
+                    max_len = len(col) + 2
+                else:
+                    max_len = min(48, max(no_match_out[col].astype(str).str.len().max(), len(col)) + 2)
+                ws.column_dimensions[get_column_letter(i)].width = max_len
+
+            # Yes/No dropdown on the Completed column
+            if "Completed" in no_match_out.columns and len(no_match_out) > 0:
+                completed_idx = list(no_match_out.columns).index("Completed") + 1  # 1-based
+                completed_letter = get_column_letter(completed_idx)
+                dv = DataValidation(
+                    type="list",
+                    formula1='"Yes,No"',
+                    allow_blank=True,
+                    showDropDown=False,  # False => dropdown arrow IS shown (openpyxl quirk)
+                )
+                dv.add(f"{completed_letter}2:{completed_letter}{len(no_match_out) + 1}")
+                ws.add_data_validation(dv)
+
+        st.download_button(
+            "📥 Download Excel (No Matching Record only)",
+            data=buffer_no_match.getvalue(),
+            file_name=f"bt_no_matching_record_{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
